@@ -110,6 +110,7 @@ def get_feature_vec(query, conditions, startDate, endDate, age_groups):
                 >= startDate
                 and datetime.strptime(condition['diagnosisDate'], '%Y-%m-%d %H:%M:%S')
                 <= endDate
+                and condition['diagnosis'] in conditions
             )
         ]
 

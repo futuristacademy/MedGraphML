@@ -1,4 +1,5 @@
 import getFeatures
+import feature_weighted_mse
 from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
@@ -62,33 +63,58 @@ def predictConditions(query):
     print(
         '\n',
         pd.DataFrame(
-            [x_train_df.mean(), y_train_df.mean(), 
-             x_validate_df.mean(), y_validate_df.mean()],
-             index=['x_train means','y_train means',
-                    'x_validate means','y_validate means']
-        ).transpose().head(60)
+            [x_train_df.mean(), y_train_df.mean()],
+             index=['x_train means','y_train means']
+        ).transpose()
     )
 
 
+    print('Computing variance equalizing feature weights')
+    
+    y_weights = 1 / (y_train_df.var() + 10e-7) / y_train_df.shape[-1]
+    
     print(
-        '\nBasic benchmark - all conditions persist\n', 
-        'Train loss',
-        keras.losses.mse(y_train_df.values, x_train_df.values).numpy().mean(),
-        'Validate loss',
-        keras.losses.mse(y_validate_df.values, x_validate_df.values).numpy().mean()
+        '\n',
+        pd.DataFrame(
+            [y_train_df.var(), y_weights],
+             index=['y_train var', 'y_weights']
+        ).transpose()
     )
     
+    
+    wmse = feature_weighted_mse.make_feature_weighted_mse(y_weights)
+    
+    print(
+        '\nBasic benchmark #1 - y means\n', 
+        'Train loss',
+        wmse(
+            y_true=y_train_df.values, 
+            y_pred=y_train_df.values.mean(axis=0)
+        ).numpy().mean(),
+    )
+    
+    
+    wmse = feature_weighted_mse.make_feature_weighted_mse(y_weights)
+    
+    print(
+        '\nBasic benchmark #2 - x means\n', 
+        'Train loss',
+        wmse(
+            y_true=y_train_df.values, 
+            y_pred=x_train_df.values.mean(axis=0)
+        ).numpy().mean(),
+    )
     
     print('\nTrain linear model (Lasso)\n')
     
     inputs = keras.layers.Input(shape=x_train_df.shape[1])
     outputs = keras.layers.Dense(
         units=y_train_df.shape[1], 
-        kernel_regularizer=keras.regularizers.l1(l=0.0000001),
+        kernel_regularizer=keras.regularizers.l1(l=0.0002),
     )(inputs)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
-    model.compile(loss='mse', optimizer=keras.optimizers.Adam())
+    model.compile(loss=wmse, optimizer=keras.optimizers.Adam())
 
     history = model.fit(
         x=x_train_df,
@@ -108,18 +134,29 @@ def predictConditions(query):
     ax = sns.heatmap(
         model.layers[1].get_weights()[0].transpose(), 
         xticklabels=x_train_df.columns, 
-        yticklabels=x_train_df.columns)
+        yticklabels=x_train_df.columns,
+        center=0.0,
+        cmap='seismic',
+    )
     
     plt.savefig('linear_coefs.png')
+    
     
     print('\nTrain non-linear model (1 hidden layer):\n')
     
     inputs = keras.layers.Input(shape=x_train_df.shape[1])
-    x = keras.layers.Dense(units=128, activation='relu')(inputs)
-    outputs = keras.layers.Dense(units=y_train_df.shape[1])(x)
+    x = keras.layers.Dense(
+        units=128, 
+        activation='relu',
+        kernel_regularizer=keras.regularizers.l1(l=0.0002),
+    )(inputs)
+    outputs = keras.layers.Dense(
+        units=y_train_df.shape[1],
+        kernel_regularizer=keras.regularizers.l1(l=0.0002),
+    )(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
-    model.compile(loss='mse', optimizer=keras.optimizers.Adam())
+    model.compile(loss=wmse, optimizer=keras.optimizers.Adam())
 
     history = model.fit(
         x=x_train_df,
