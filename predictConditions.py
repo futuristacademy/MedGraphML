@@ -14,17 +14,20 @@ def predictConditions(query):
     conditions = getFeatures.get_conditions(
         query=query, startDate='2019-01-01', endDate='2020-12-31')
     
-    print(conditions[:20])
+    print(conditions)
     
+
     patients = getFeatures.get_live_patients(
         query=query, startDate='2019-12-31', endDate='2019-12-31')
     
     print('\nNumber of patients', len(patients))
     
+
     age_groups = getFeatures.make_age_groups()
     
     print('\nAge groups\n', age_groups)
     
+
     print('\nCompute features: ')
     
     x_df = getFeatures.get_feature_vec(
@@ -58,19 +61,52 @@ def predictConditions(query):
     x_test_df = x_df.loc[test]
     y_test_df = y_df.loc[test]
     
-    print('Train set:', len(train), 'Validate set: ', len(validate), 'Test set: ', len(test))
+    print('\n\nTrain set:', len(train), 'Validate set: ', len(validate), 'Test set: ', len(test))
     
     print(
-        '\n',
-        pd.DataFrame(
-            [x_train_df.mean(), y_train_df.mean()],
-             index=['x_train means','y_train means']
-        ).transpose()
+        '\n\nSorted x_train means:\n\n',
+        x_train_df.mean().sort_values(ascending=False), 
+        '\n\nSorted y_train means:\n\n',
+        y_train_df.mean().sort_values(ascending=False)
     )
 
-
-    print('Computing variance equalizing feature weights')
+    filter_below = 20
+    print('\nFiltereing conditions with less than {} cases:'.format(filter_below))
     
+    x_drop_list = ( 
+        set(x_train_df.columns[x_train_df.sum() < filter_below])
+        | set(x_test_df.columns[x_train_df.sum() < filter_below])
+        | set(x_validate_df.columns[x_train_df.sum() < filter_below])
+    )
+
+    x_train_df = x_train_df.drop(x_drop_list, axis=1)
+    x_validate_df = x_validate_df.drop(x_drop_list, axis=1)
+    x_test_df = x_test_df.drop(x_drop_list, axis=1)
+
+    y_drop_list = ( 
+        set(y_train_df.columns[y_train_df.sum() < filter_below])
+        | set(y_test_df.columns[y_train_df.sum() < filter_below])
+        | set(y_validate_df.columns[y_train_df.sum() < filter_below])
+    )
+
+    y_train_df = y_train_df.drop(y_drop_list, axis=1)
+    y_validate_df = y_validate_df.drop(y_drop_list, axis=1)
+    y_test_df = y_test_df.drop(y_drop_list, axis=1)
+
+    print(
+        '\n\nSorted x_train means:\n\n',
+        x_train_df.mean().sort_values(ascending=False), 
+        '\n\nSorted y_train means:\n\n\n\n',
+        y_train_df.mean().sort_values(ascending=False)
+    )
+    
+    print(
+        '\n\nSorted x_test means:\n\n',
+        x_test_df.mean().sort_values(ascending=False), 
+        '\n\nSorted y_test means:\n\n\n\n',
+        y_test_df.mean().sort_values(ascending=False)
+    )
+
     y_weights = 1 / (y_train_df.var() + 10e-7) / y_train_df.shape[-1]
     
     print(
@@ -82,6 +118,7 @@ def predictConditions(query):
     )
     
     
+
     wmse = feature_weighted_mse.make_feature_weighted_mse(y_weights)
     
     print(
@@ -92,19 +129,7 @@ def predictConditions(query):
             y_pred=y_train_df.values.mean(axis=0)
         ).numpy().mean(),
     )
-    
-    
-    wmse = feature_weighted_mse.make_feature_weighted_mse(y_weights)
-    
-    print(
-        '\nBasic benchmark #2 - x means\n', 
-        'Train loss',
-        wmse(
-            y_true=y_train_df.values, 
-            y_pred=x_train_df.values.mean(axis=0)
-        ).numpy().mean(),
-    )
-    
+
     print('\nTrain linear model (Lasso)\n')
     
     inputs = keras.layers.Input(shape=x_train_df.shape[1])
@@ -134,14 +159,14 @@ def predictConditions(query):
     ax = sns.heatmap(
         model.layers[1].get_weights()[0].transpose(), 
         xticklabels=x_train_df.columns, 
-        yticklabels=x_train_df.columns,
+        yticklabels=y_train_df.columns,
         center=0.0,
         cmap='seismic',
     )
     
     plt.savefig('linear_coefs.png')
     
-    
+
     print('\nTrain non-linear model (1 hidden layer):\n')
     
     inputs = keras.layers.Input(shape=x_train_df.shape[1])
