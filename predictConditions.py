@@ -6,6 +6,9 @@ import pandas as pd
 import tensorflow.keras as keras
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
+from scipy.stats import ttest_1samp    
+from statsmodels.stats.multitest import multipletests
 
 def predictConditions(query):
     
@@ -52,16 +55,13 @@ def predictConditions(query):
     
 
     train, test = train_test_split(patients, test_size=0.25, random_state=42)
-    train, validate = train_test_split(train, test_size=1/3, random_state=42)
     
     x_train_df = x_df.loc[train]
     y_train_df = y_df.loc[train]
-    x_validate_df = x_df.loc[validate]
-    y_validate_df = y_df.loc[validate]
     x_test_df = x_df.loc[test]
     y_test_df = y_df.loc[test]
     
-    print('\n\nTrain set:', len(train), 'Validate set: ', len(validate), 'Test set: ', len(test))
+    print('\n\nTrain set:', len(train), 'Test set: ', len(test))
     
     print(
         '\n\nSorted x_train means:\n\n',
@@ -76,21 +76,17 @@ def predictConditions(query):
     x_drop_list = ( 
         set(x_train_df.columns[x_train_df.sum() < filter_below])
         | set(x_test_df.columns[x_train_df.sum() < filter_below])
-        | set(x_validate_df.columns[x_train_df.sum() < filter_below])
     )
 
     x_train_df = x_train_df.drop(x_drop_list, axis=1)
-    x_validate_df = x_validate_df.drop(x_drop_list, axis=1)
     x_test_df = x_test_df.drop(x_drop_list, axis=1)
 
     y_drop_list = ( 
         set(y_train_df.columns[y_train_df.sum() < filter_below])
         | set(y_test_df.columns[y_train_df.sum() < filter_below])
-        | set(y_validate_df.columns[y_train_df.sum() < filter_below])
     )
 
     y_train_df = y_train_df.drop(y_drop_list, axis=1)
-    y_validate_df = y_validate_df.drop(y_drop_list, axis=1)
     y_test_df = y_test_df.drop(y_drop_list, axis=1)
 
     print(
@@ -129,35 +125,130 @@ def predictConditions(query):
             y_pred=y_train_df.values.mean(axis=0)
         ).numpy().mean(),
     )
-
-    print('\nTrain linear model (Lasso)\n')
     
-    inputs = keras.layers.Input(shape=x_train_df.shape[1])
-    outputs = keras.layers.Dense(
-        units=y_train_df.shape[1], 
-        kernel_regularizer=keras.regularizers.l1(l=0.0002),
-    )(inputs)
-    model = keras.Model(inputs=inputs, outputs=outputs)
+    
 
-    model.compile(loss=wmse, optimizer=keras.optimizers.Adam())
+    from sklearn.model_selection import RepeatedKFold
 
-    history = model.fit(
-        x=x_train_df,
-        y=y_train_df,
-        batch_size=128,
-        epochs=1000,
-        validation_data=(x_validate_df, y_validate_df),
-        callbacks=[
-            keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-        ]
+    n_splits = 4
+    n_repeats = 2
+    alpha=0.0001
+    
+    print('\nTrain linear model using Lasso alpha {} {}-fold CV repeated {} times.\n'.format(
+        alpha, n_splits, n_repeats,
+    ))
+    
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+    
+    models=[]
+    history=[]
+    performance=[]
+    
+    i=0
+    for train_index, validate_index in rkf.split(x_train_df):
+        
+        i += 1
+        print('\n\nFold {} out of {}\n\n'.format(i, n_splits*n_repeats))
+        
+        x_train, x_validate = x_train_df.iloc[train_index], x_train_df.iloc[validate_index]
+        y_train, y_validate = y_train_df.iloc[train_index], y_train_df.iloc[validate_index]
+    
+        inputs = keras.layers.Input(shape=x_train_df.shape[1])
+        outputs = keras.layers.Dense(
+            units=y_train_df.shape[1], 
+            kernel_regularizer=keras.regularizers.l1(l=alpha),
+        )(inputs)
+        
+        models.append(keras.Model(inputs=inputs, outputs=outputs))
+
+        models[-1].compile(loss=wmse, optimizer=keras.optimizers.Adam())
+
+        history.append(models[-1].fit(
+            x=x_train,
+            y=y_train,
+            batch_size=128,
+            epochs=1000,
+            validation_data=(x_validate, y_validate),
+            callbacks=[
+                keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
+            ]
+        ))
+    
+        print('\nEvaluate on test set:\n')
+        performance.append(models[-1].evaluate(x=x_test_df, y=y_test_df))
+        print(performance[-1],'\n')
+
+    from scipy.stats import ttest_1samp    
+    from statsmodels.stats.multitest import multipletests
+    
+    constant_df = pd.DataFrame(
+        np.array([model.layers[1].get_weights()[1] for model in models]).transpose(), 
+        index=y_train_df.columns, 
+        columns=['Fold {}'.format(i) for i in range(1, 1+n_splits*n_repeats)],
     )
+        
+    constant_mean = constant_df.mean(axis=1)
+    constant_mean.name = 'mean'
     
-    print('\nEvaluate on test set:\n')
-    print(model.evaluate(x=x_test_df, y=y_test_df))
+    constant_std = constant_df.std(axis=1, ddof=1)
+    constant_std.name = 'std'
+    
+    constant_p_value = constant_df.apply(lambda x: ttest_1samp(x, 0)[1], axis=1)
+    constant_p_value.name = 'p-value'
+    
+    constant_df = pd.concat([constant_mean, constant_std, constant_p_value], axis=1)
 
-    f, ax = plt.subplots(figsize=(50, 50))
+    constant_df['FDR adj p-value'] = multipletests(constant_p_value, method='fdr_bh')[1]
+    
+    constant_df.to_csv('constant.csv')
+    print('\n\nConstants:\n\n ', constant_df.head(30))
+
+
+    coef_mat = np.array([model.layers[1].get_weights()[0] for model in models]).transpose((1, 2, 0))
+    
+    coef_df = pd.DataFrame(
+        [[json.dumps(coef_mat[i,j].tolist()) 
+          for j in range(coef_mat.shape[1])] 
+         for i in range(coef_mat.shape[0])], 
+        columns=y_train_df.columns, 
+        index=x_train_df.columns
+    ).transpose()
+    
+    coef_mean = coef_df.applymap(lambda x: np.mean(json.loads(x)))
+    coef_mean.to_csv('coef_mean.csv')
+    
+    coef_std = coef_df.applymap(lambda x: np.std(json.loads(x), ddof=1))
+    coef_std.to_csv('coef_std.csv')
+    
+    coef_p_value = coef_df.applymap(lambda x: ttest_1samp(json.loads(x), 0)[1])
+    coef_p_value.to_csv('coef_p_value.csv')
+    
+    coef_p_value_adj = multipletests(
+        coef_p_value.values.reshape((-1,)), 
+        method='fdr_bh')[1].reshape(coef_p_value.shape)
+    
+    coef_p_value_adj = pd.DataFrame(
+        coef_p_value_adj, index=y_train_df.columns, columns=x_train_df.columns)
+    coef_p_value_adj.to_csv('coef_p_value_adj.csv')
+
+    nonzero = coef_p_value_adj.applymap(lambda x: x <= 0.05).values.nonzero()
+
+    tuples = [(
+        coef_df.index[i], 
+        coef_df.columns[j], 
+        coef_mean.iloc[i,j],
+        coef_std.iloc[i,j],
+        coef_p_value.iloc[i,j],
+        coef_p_value_adj.iloc[i,j],
+    ) for i,j in zip(nonzero[0],nonzero[1])]
+    
+    coef_df = pd.DataFrame(tuples, columns=['y','x','mean', 'std', 'p-value', 'FDR adj p-value'])
+    coef_df.to_csv('coef.csv', index=False)
+    print(coef_df.head(30))
+
+    f, ax = plt.subplots(figsize=(80, 50))
     ax = sns.heatmap(
-        model.layers[1].get_weights()[0].transpose(), 
+        coef_mean, 
         xticklabels=x_train_df.columns, 
         yticklabels=y_train_df.columns,
         center=0.0,
@@ -165,34 +256,3 @@ def predictConditions(query):
     )
     
     plt.savefig('linear_coefs.png')
-    
-
-    print('\nTrain non-linear model (1 hidden layer):\n')
-    
-    inputs = keras.layers.Input(shape=x_train_df.shape[1])
-    x = keras.layers.Dense(
-        units=128, 
-        activation='relu',
-        kernel_regularizer=keras.regularizers.l1(l=0.0002),
-    )(inputs)
-    outputs = keras.layers.Dense(
-        units=y_train_df.shape[1],
-        kernel_regularizer=keras.regularizers.l1(l=0.0002),
-    )(x)
-    model = keras.Model(inputs=inputs, outputs=outputs)
-
-    model.compile(loss=wmse, optimizer=keras.optimizers.Adam())
-
-    history = model.fit(
-        x=x_train_df,
-        y=y_train_df,
-        batch_size=128,
-        epochs=1000,
-        validation_data=(x_validate_df, y_validate_df),
-        callbacks=[
-            keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-        ]
-    )
-    
-    print('\nEvaluate on test set:\n')
-    print(model.evaluate(x=x_test_df, y=y_test_df))
