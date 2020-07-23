@@ -103,13 +103,14 @@ def predictConditions(query):
         y_test_df.mean().sort_values(ascending=False)
     )
 
-    y_weights = 1 / (y_train_df.var() + 10e-7) / y_train_df.shape[-1]
+    y_weights = 1 / (y_train_df.var() + 1e-3)
+    y_weights = y_weights/(y_train_df.var()*y_weights).sum()
     
     print(
         '\n',
         pd.DataFrame(
-            [y_train_df.var(), y_weights],
-             index=['y_train var', 'y_weights']
+            [y_train_df.var(), y_weights, y_weights*y_train_df.var()],
+             index=['y_train var', 'y_weights', 'var*weight']
         ).transpose()
     )
     
@@ -118,7 +119,7 @@ def predictConditions(query):
     wmse = feature_weighted_mse.make_feature_weighted_mse(y_weights)
     
     print(
-        '\nBasic benchmark #1 - y means\n', 
+        '\nBasic benchmark - y means\n', 
         'Train loss',
         wmse(
             y_true=y_train_df.values, 
@@ -133,6 +134,8 @@ def predictConditions(query):
     n_splits = 4
     n_repeats = 2
     alpha=0.0001
+    learning_rate=0.001
+    patience=10
     
     print('\nTrain linear model using Lasso alpha {} {}-fold CV repeated {} times.\n'.format(
         alpha, n_splits, n_repeats,
@@ -161,7 +164,7 @@ def predictConditions(query):
         
         models.append(keras.Model(inputs=inputs, outputs=outputs))
 
-        models[-1].compile(loss=wmse, optimizer=keras.optimizers.Adam())
+        models[-1].compile(loss=wmse, optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
 
         history.append(models[-1].fit(
             x=x_train,
@@ -170,7 +173,7 @@ def predictConditions(query):
             epochs=1000,
             validation_data=(x_validate, y_validate),
             callbacks=[
-                keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
+                keras.callbacks.EarlyStopping(patience=patience, restore_best_weights=True),
             ]
         ))
     
@@ -178,14 +181,16 @@ def predictConditions(query):
         performance.append(models[-1].evaluate(x=x_test_df, y=y_test_df))
         print(performance[-1],'\n')
 
-    from scipy.stats import ttest_1samp    
-    from statsmodels.stats.multitest import multipletests
+    print('Test loss mean', np.mean(performance), 'std' , np.std(performance, ddof=1))
+    
     
     constant_df = pd.DataFrame(
         np.array([model.layers[1].get_weights()[1] for model in models]).transpose(), 
         index=y_train_df.columns, 
         columns=['Fold {}'.format(i) for i in range(1, 1+n_splits*n_repeats)],
     )
+    
+    constant_name = pd.Series(constant_df.index, index=constant_df.index, name='name')
         
     constant_mean = constant_df.mean(axis=1)
     constant_mean.name = 'mean'
@@ -193,14 +198,15 @@ def predictConditions(query):
     constant_std = constant_df.std(axis=1, ddof=1)
     constant_std.name = 'std'
     
-    constant_p_value = constant_df.apply(lambda x: ttest_1samp(x, 0)[1], axis=1)
-    constant_p_value.name = 'p-value'
+    constant_df = pd.concat(
+        [constant_name, constant_mean, constant_std], axis=1)
     
-    constant_df = pd.concat([constant_mean, constant_std, constant_p_value], axis=1)
-
+    constant_df['p-value'] = (1 - t.cdf(
+        x=abs(constant_mean/constant_std), df=n_splits*n_repeats-1)) * 2
+    
     constant_df['FDR adj p-value'] = multipletests(constant_p_value, method='fdr_bh')[1]
     
-    constant_df.to_csv('constant.csv')
+    constant_df.to_csv('constant.csv', index=False)
     print('\n\nConstants:\n\n ', constant_df.head(30))
 
 
@@ -220,7 +226,11 @@ def predictConditions(query):
     coef_std = coef_df.applymap(lambda x: np.std(json.loads(x), ddof=1))
     coef_std.to_csv('coef_std.csv')
     
-    coef_p_value = coef_df.applymap(lambda x: ttest_1samp(json.loads(x), 0)[1])
+    coef_p_value = pd.DataFrame(
+        (1 - t.cdf(x=abs(coef_mean/coef_std), df=n_splits*n_repeats-1)) * 2,
+        index=coef_df.index,
+        columns=coef_df.columns
+    )
     coef_p_value.to_csv('coef_p_value.csv')
     
     coef_p_value_adj = multipletests(
