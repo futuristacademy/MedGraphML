@@ -7,7 +7,7 @@ import tensorflow.keras as keras
 import matplotlib.pyplot as plt
 import seaborn as sns
 import json
-from scipy.stats import ttest_1samp    
+from scipy.stats import t    
 from statsmodels.stats.multitest import multipletests
 
 def predictConditions(query):
@@ -204,7 +204,7 @@ def predictConditions(query):
     constant_df['p-value'] = (1 - t.cdf(
         x=abs(constant_mean/constant_std), df=n_splits*n_repeats-1)) * 2
     
-    constant_df['FDR adj p-value'] = multipletests(constant_p_value, method='fdr_bh')[1]
+    constant_df['FDR adj p-value'] = multipletests(constant_df['p-value'], method='fdr_bh')[1]
     
     constant_df.to_csv('constant.csv', index=False)
     print('\n\nConstants:\n\n ', constant_df.head(30))
